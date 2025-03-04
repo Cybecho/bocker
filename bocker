@@ -1,119 +1,119 @@
-#!/usr/bin/env bash
-set -o errexit -o nounset -o pipefail; shopt -s nullglob
-btrfs_path='/var/bocker' && cgroups='cpu,cpuacct,memory';
-[[ $# -gt 0 ]] && while [ "${1:0:2}" == '--' ]; do OPTION=${1:2}; [[ $OPTION =~ = ]] && declare "BOCKER_${OPTION/=*/}=${OPTION/*=/}" || declare "BOCKER_${OPTION}=x"; shift; done
+#!/usr/bin/env bash                                                                				# Bash 인터프리터를 사용
+set -o errexit -o nounset -o pipefail; shopt -s nullglob                         				# 오류 처리 및 nullglob 설정
+btrfs_path='/var/bocker' && cgroups='cpu,cpuacct,memory';                        				# Btrfs 경로와 cgroups 설정
+[[ $# -gt 0 ]] && while [ "${1:0:2}" == '--' ]; do OPTION=${1:2}; [[ $OPTION =~ = ]] && declare "BOCKER_${OPTION/=*/}=${OPTION/*=/}" || declare "BOCKER_${OPTION}=x"; shift; done    # 명령줄 옵션 파싱
 
-function bocker_check() {
-	btrfs subvolume list "$btrfs_path" | grep -qw "$1" && echo 0 || echo 1
+function bocker_check() {                                                         				# Btrfs 서브볼륨 존재 확인 함수
+	btrfs subvolume list "$btrfs_path" | grep -qw "$1" && echo 0 || echo 1       				# 서브볼륨 확인 및 결과 반환
 }
 
-function bocker_init() { #HELP Create an image from a directory:\nBOCKER init <directory>
-	uuid="img_$(shuf -i 42002-42254 -n 1)"
-	if [[ -d "$1" ]]; then
-		[[ "$(bocker_check "$uuid")" == 0 ]] && bocker_run "$@"
-		btrfs subvolume create "$btrfs_path/$uuid" > /dev/null
-		cp -rf --reflink=auto "$1"/* "$btrfs_path/$uuid" > /dev/null
-		[[ ! -f "$btrfs_path/$uuid"/img.source ]] && echo "$1" > "$btrfs_path/$uuid"/img.source
-		echo "Created: $uuid"
+function bocker_init() { #HELP Create an image from a directory:\nBOCKER init <directory>    	# 이미지 초기화 함수
+	uuid="img_$(shuf -i 42002-42254 -n 1)"                                        				# 랜덤 UUID 생성
+	if [[ -d "$1" ]]; then                                                        				# 디렉토리 존재 확인
+		[[ "$(bocker_check "$uuid")" == 0 ]] && bocker_run "$@"                   				# UUID 중복 확인
+		btrfs subvolume create "$btrfs_path/$uuid" > /dev/null                    				# 새 서브볼륨 생성
+		cp -rf --reflink=auto "$1"/* "$btrfs_path/$uuid" > /dev/null             				# 디렉토리 내용 복사
+		[[ ! -f "$btrfs_path/$uuid"/img.source ]] && echo "$1" > "$btrfs_path/$uuid"/img.source # 소스 기록
+		echo "Created: $uuid"                                                      				# 성공 메시지 출력
 	else
-		echo "No directory named '$1' exists"
+		echo "No directory named '$1' exists"                                     				# 오류 메시지 출력
 	fi
 }
 
-function bocker_pull() { #HELP Pull an image from Docker Hub:\nBOCKER pull <name> <tag>
-	token="$(curl -sL -o /dev/null -D- -H 'X-Docker-Token: true' "https://index.docker.io/v1/repositories/$1/images" | tr -d '\r' | awk -F ': *' '$1 == "X-Docker-Token" { print $2 }')"
-	registry='https://registry-1.docker.io/v1'
-	id="$(curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags/$2" | sed 's/"//g')"
-	[[ "${#id}" -ne 64 ]] && echo "No image named '$1:$2' exists" && exit 1
-	ancestry="$(curl -sL -H "Authorization: Token $token" "$registry/images/$id/ancestry")"
-	IFS=',' && ancestry=(${ancestry//[\[\] \"]/}) && IFS=' \n\t'; tmp_uuid="$(uuidgen)" && mkdir /tmp/"$tmp_uuid"
-	for id in "${ancestry[@]}"; do
-		curl -#L -H "Authorization: Token $token" "$registry/images/$id/layer" -o /tmp/"$tmp_uuid"/layer.tar
-		tar xf /tmp/"$tmp_uuid"/layer.tar -C /tmp/"$tmp_uuid" && rm /tmp/"$tmp_uuid"/layer.tar
+function bocker_pull() { #HELP Pull an image from Docker Hub:\nBOCKER pull <name> <tag>    # Docker Hub에서 이미지 가져오기 함수
+	token="$(curl -sL -o /dev/null -D- -H 'X-Docker-Token: true' "https://index.docker.io/v1/repositories/$1/images" | tr -d '\r' | awk -F ': *' '$1 == "X-Docker-Token" { print $2 }')"    # Docker 인증 토큰 획득
+	registry='https://registry-1.docker.io/v1'                                    				# 레지스트리 URL 설정
+	id="$(curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags/$2" | sed 's/"//g')"    			# 이미지 ID 가져오기
+	[[ "${#id}" -ne 64 ]] && echo "No image named '$1:$2' exists" && exit 1      				# 유효하지 않은 이미지 ID 검사
+	ancestry="$(curl -sL -H "Authorization: Token $token" "$registry/images/$id/ancestry)"    	# 이미지 계층 구조 가져오기
+	IFS=',' && ancestry=(${ancestry//[\[\] \"]/}) && IFS=' \n\t'; tmp_uuid="$(uuidgen)" && mkdir /tmp/"$tmp_uuid"    	# 임시 디렉토리 생성
+	for id in "${ancestry[@]}"; do                                               				# 각 레이어 처리
+		curl -#L -H "Authorization: Token $token" "$registry/images/$id/layer" -o /tmp/"$tmp_uuid"/layer.tar    		# 레이어 다운로드
+		tar xf /tmp/"$tmp_uuid"/layer.tar -C /tmp/"$tmp_uuid" && rm /tmp/"$tmp_uuid"/layer.tar  # 레이어 압축 해제
 	done
-	echo "$1:$2" > /tmp/"$tmp_uuid"/img.source
-	bocker_init /tmp/"$tmp_uuid" && rm -rf /tmp/"$tmp_uuid"
+	echo "$1:$2" > /tmp/"$tmp_uuid"/img.source                                   				# 이미지 소스 기록
+	bocker_init /tmp/"$tmp_uuid" && rm -rf /tmp/"$tmp_uuid"                      				# 이미지 초기화 및 정리
 }
 
-function bocker_rm() { #HELP Delete an image or container:\nBOCKER rm <image_id or container_id>
-	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
-	btrfs subvolume delete "$btrfs_path/$1" > /dev/null
-	cgdelete -g "$cgroups:/$1" &> /dev/null || true
-	echo "Removed: $1"
+function bocker_rm() { #HELP Delete an image or container:\nBOCKER rm <image_id or container_id># 이미지/컨테이너 삭제 함수
+	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1    	# 존재 여부 확인
+	btrfs subvolume delete "$btrfs_path/$1" > /dev/null                          				# 서브볼륨 삭제
+	cgdelete -g "$cgroups:/$1" &> /dev/null || true                             				# cgroup 삭제
+	echo "Removed: $1"                                                           				# 성공 메시지 출력
 }
 
-function bocker_images() { #HELP List images:\nBOCKER images
-	echo -e "IMAGE_ID\t\tSOURCE"
-	for img in "$btrfs_path"/img_*; do
-		img=$(basename "$img")
-		echo -e "$img\t\t$(cat "$btrfs_path/$img/img.source")"
-	done
-}
-
-function bocker_ps() { #HELP List containers:\nBOCKER ps
-	echo -e "CONTAINER_ID\t\tCOMMAND"
-	for ps in "$btrfs_path"/ps_*; do
-		ps=$(basename "$ps")
-		echo -e "$ps\t\t$(cat "$btrfs_path/$ps/$ps.cmd")"
+function bocker_images() { #HELP List images:\nBOCKER images                     				# 이미지 목록 표시 함수
+	echo -e "IMAGE_ID\t\tSOURCE"                                                 				# 헤더 출력
+	for img in "$btrfs_path"/img_*; do                                          				# 이미지 순회
+		img=$(basename "$img")                                                    				# 이미지 이름 추출
+		echo -e "$img\t\t$(cat "$btrfs_path/$img/img.source")"                   				# 이미지 정보 출력
 	done
 }
 
-function bocker_run() { #HELP Create a container:\nBOCKER run <image_id> <command>
-	uuid="ps_$(shuf -i 42002-42254 -n 1)"
-	[[ "$(bocker_check "$1")" == 1 ]] && echo "No image named '$1' exists" && exit 1
-	[[ "$(bocker_check "$uuid")" == 0 ]] && echo "UUID conflict, retrying..." && bocker_run "$@" && return
-	cmd="${@:2}" && ip="$(echo "${uuid: -3}" | sed 's/0//g')" && mac="${uuid: -3:1}:${uuid: -2}"
-	ip link add dev veth0_"$uuid" type veth peer name veth1_"$uuid"
-	ip link set dev veth0_"$uuid" up
-	ip link set veth0_"$uuid" master bridge0
-	ip netns add netns_"$uuid"
-	ip link set veth1_"$uuid" netns netns_"$uuid"
-	ip netns exec netns_"$uuid" ip link set dev lo up
-	ip netns exec netns_"$uuid" ip link set veth1_"$uuid" address 02:42:ac:11:00"$mac"
-	ip netns exec netns_"$uuid" ip addr add 10.0.0."$ip"/24 dev veth1_"$uuid"
-	ip netns exec netns_"$uuid" ip link set dev veth1_"$uuid" up
-	ip netns exec netns_"$uuid" ip route add default via 10.0.0.1
-	btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$uuid" > /dev/null
-	echo 'nameserver 8.8.8.8' > "$btrfs_path/$uuid"/etc/resolv.conf
-	echo "$cmd" > "$btrfs_path/$uuid/$uuid.cmd"
-	cgcreate -g "$cgroups:/$uuid"
-	: "${BOCKER_CPU_SHARE:=512}" && cgset -r cpu.shares="$BOCKER_CPU_SHARE" "$uuid"
-	: "${BOCKER_MEM_LIMIT:=512}" && cgset -r memory.limit_in_bytes="$((BOCKER_MEM_LIMIT * 1000000))" "$uuid"
+function bocker_ps() { #HELP List containers:\nBOCKER ps                         				# 컨테이너 목록 표시 함수
+	echo -e "CONTAINER_ID\t\tCOMMAND"                                            				# 헤더 출력
+	for ps in "$btrfs_path"/ps_*; do                                            				# 컨테이너 순회
+		ps=$(basename "$ps")                                                      				# 컨테이너 이름 추출
+		echo -e "$ps\t\t$(cat "$btrfs_path/$ps/$ps.cmd")"                        				# 컨테이너 정보 출력
+	done
+}
+
+function bocker_run() { #HELP Create a container:\nBOCKER run <image_id> <command>    			# 컨테이너 생성 및 실행 함수
+	uuid="ps_$(shuf -i 42002-42254 -n 1)"                                        				# 컨테이너 UUID 생성
+	[[ "$(bocker_check "$1")" == 1 ]] && echo "No image named '$1' exists" && exit 1    		# 이미지 존재 확인
+	[[ "$(bocker_check "$uuid")" == 0 ]] && echo "UUID conflict, retrying..." && bocker_run "$@" && return  # UUID 충돌 처리
+	cmd="${@:2}" && ip="$(echo "${uuid: -3}" | sed 's/0//g')" && mac="${uuid: -3:1}:${uuid: -2}"    		# 명령어와 네트워크 설정
+	ip link add dev veth0_"$uuid" type veth peer name veth1_"$uuid"             				# 가상 네트워크 인터페이스 생성
+	ip link set dev veth0_"$uuid" up                                            				# 호스트 측 인터페이스 활성화
+	ip link set veth0_"$uuid" master bridge0                                    				# 브리지에 인터페이스 연결
+	ip netns add netns_"$uuid"                                                  				# 네트워크 네임스페이스 생성
+	ip link set veth1_"$uuid" netns netns_"$uuid"                              					# 컨테이너에 인터페이스 할당
+	ip netns exec netns_"$uuid" ip link set dev lo up                          					# 로컬호스트 인터페이스 활성화
+	ip netns exec netns_"$uuid" ip link set veth1_"$uuid" address 02:42:ac:11:00"$mac"    		# MAC 주소 설정
+	ip netns exec netns_"$uuid" ip addr add 10.0.0."$ip"/24 dev veth1_"$uuid"  					# IP 주소 할당
+	ip netns exec netns_"$uuid" ip link set dev veth1_"$uuid" up               					# 컨테이너 측 인터페이스 활성화
+	ip netns exec netns_"$uuid" ip route add default via 10.0.0.1              					# 기본 라우트 설정
+	btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$uuid" > /dev/null  					# 이미지 스냅샷 생성
+	echo 'nameserver 8.8.8.8' > "$btrfs_path/$uuid"/etc/resolv.conf            					# DNS 설정
+	echo "$cmd" > "$btrfs_path/$uuid/$uuid.cmd"                                					# 실행 명령어 기록
+	cgcreate -g "$cgroups:/$uuid"                                              					# cgroup 생성
+	: "${BOCKER_CPU_SHARE:=512}" && cgset -r cpu.shares="$BOCKER_CPU_SHARE" "$uuid"    			# CPU 자원 제한 설정
+	: "${BOCKER_MEM_LIMIT:=512}" && cgset -r memory.limit_in_bytes="$((BOCKER_MEM_LIMIT * 1000000))" "$uuid"    # 메모리 제한 설정
 	cgexec -g "$cgroups:$uuid" \
 		ip netns exec netns_"$uuid" \
 		unshare -fmuip --mount-proc \
 		chroot "$btrfs_path/$uuid" \
 		/bin/sh -c "/bin/mount -t proc proc /proc && $cmd" \
-		2>&1 | tee "$btrfs_path/$uuid/$uuid.log" || true
-	ip link del dev veth0_"$uuid"
-	ip netns del netns_"$uuid"
+		2>&1 | tee "$btrfs_path/$uuid/$uuid.log" || true                        				# 컨테이너 실행 및 로그 기록
+	ip link del dev veth0_"$uuid"                                              					# 네트워크 인터페이스 제거
+	ip netns del netns_"$uuid"                                                 					# 네트워크 네임스페이스 제거
 }
 
-function bocker_exec() { #HELP Execute a command in a running container:\nBOCKER exec <container_id> <command>
-	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
-	cid="$(ps o ppid,pid | grep "^$(ps o pid,cmd | grep -E "^\ *[0-9]+ unshare.*$1" | awk '{print $1}')" | awk '{print $2}')"
-	[[ ! "$cid" =~ ^\ *[0-9]+$ ]] && echo "Container '$1' exists but is not running" && exit 1
-	nsenter -t "$cid" -m -u -i -n -p chroot "$btrfs_path/$1" "${@:2}"
+function bocker_exec() { #HELP Execute a command in a running container:\nBOCKER exec <container_id> <command>    # 실행 중인 컨테이너에서 명령 실행
+	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1    	# 컨테이너 존재 확인
+	cid="$(ps o ppid,pid | grep "^$(ps o pid,cmd | grep -E "^\ *[0-9]+ unshare.*$1" | awk '{print $1}')" | awk '{print $2}')"    # 컨테이너 PID 찾기
+	[[ ! "$cid" =~ ^\ *[0-9]+$ ]] && echo "Container '$1' exists but is not running" && exit 1  # 실행 상태 확인
+	nsenter -t "$cid" -m -u -i -n -p chroot "$btrfs_path/$1" "${@:2}"          					# 컨테이너 내부에서 명령 실행
 }
 
-function bocker_logs() { #HELP View logs from a container:\nBOCKER logs <container_id>
-	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
-	cat "$btrfs_path/$1/$1.log"
+function bocker_logs() { #HELP View logs from a container:\nBOCKER logs <container_id>    		# 컨테이너 로그 보기 함수
+	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1    	# 컨테이너 존재 확인
+	cat "$btrfs_path/$1/$1.log"                                                 				# 로그 파일 출력
 }
 
-function bocker_commit() { #HELP Commit a container to an image:\nBOCKER commit <container_id> <image_id>
-	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
-	[[ "$(bocker_check "$2")" == 1 ]] && echo "No image named '$2' exists" && exit 1
-	bocker_rm "$2" && btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$2" > /dev/null
-	echo "Created: $2"
+function bocker_commit() { #HELP Commit a container to an image:\nBOCKER commit <container_id> <image_id>    # 컨테이너를 이미지로 커밋하는 함수
+	[[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1    	# 컨테이너 존재 확인
+	[[ "$(bocker_check "$2")" == 1 ]] && echo "No image named '$2' exists" && exit 1    		# 이미지 존재 확인
+	bocker_rm "$2" && btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$2" > /dev/null    # 기존 이미지 제거 및 스냅샷 생성
+	echo "Created: $2"                                                          				# 성공 메시지 출력
 }
 
-function bocker_help() { #HELP Display this message:\nBOCKER help
-	sed -n "s/^.*#HELP\\s//p;" < "$1" | sed "s/\\\\n/\n\t/g;s/$/\n/;s!BOCKER!${1/!/\\!}!g"
+function bocker_help() { #HELP Display this message:\nBOCKER help               				# 도움말 표시 함수
+	sed -n "s/^.*#HELP\\s//p;" < "$1" | sed "s/\\\\n/\n\t/g;s/$/\n/;s!BOCKER!${1/!/\\!}!g"    	# 도움말 메시지 파싱 및 출력
 }
 
-[[ -z "${1-}" ]] && bocker_help "$0"
+[[ -z "${1-}" ]] && bocker_help "$0"                                            				# 인자가 없으면 도움말 표시
 case $1 in
-	pull|init|rm|images|ps|run|exec|logs|commit) bocker_"$1" "${@:2}" ;;
-	*) bocker_help "$0" ;;
+	pull|init|rm|images|ps|run|exec|logs|commit) bocker_"$1" "${@:2}" ;;        				# 유효한 명령어 실행
+	*) bocker_help "$0" ;;                                                      				# 알 수 없는 명령어면 도움말 표시
 esac

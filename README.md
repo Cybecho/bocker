@@ -1,15 +1,17 @@
 # Bocker
-Docker implemented in around 100 lines of bash.
+약 100줄의 배쉬로 구현된 Docker.
 
-  * [Prerequisites](#prerequisites)
-  * [Example Usage](#example-usage)
-  * [Functionality: Currently Implemented](#functionality-currently-implemented)
-  * [Functionality: Not Yet Implemented](#functionality-not-yet-implemented)
-  * [License](#license)
+- [Bocker](#bocker)
+  - [Prerequisites](#prerequisites)
+  - [Example Usage](#example-usage)
+  - [기능: 현재 구현됨](#기능-현재-구현됨)
+  - [기능을 매우 제한적으로 구현합니다: 아직 구현되지 않음](#기능을-매우-제한적으로-구현합니다-아직-구현되지-않음)
+  - [코드 로직 단순나열](#코드-로직-단순나열)
+  - [License](#license)
 
 ## Prerequisites
 
-The following packages are needed to run bocker.
+bocker를 실행하려면 다음 패키지가 필요합니다.
 
 * btrfs-progs
 * curl
@@ -19,18 +21,18 @@ The following packages are needed to run bocker.
 * util-linux >= 2.25.2
 * coreutils >= 7.5
 
-Because most distributions do not ship a new enough version of util-linux you will probably need to grab the sources from [here](https://www.kernel.org/pub/linux/utils/util-linux/v2.25/) and compile it yourself.
+대부분의 배포판에는 충분히 새로운 버전의 유틸리티 리눅스가 제공되지 않으므로 [여기](https://www.kernel.org/pub/linux/utils/util-linux/v2.25/)에서 소스를 가져와 직접 컴파일해야 할 수도 있습니다.
 
-Additionally your system will need to be configured with the following:
+또한 시스템을 다음과 같이 구성해야 합니다:
 
-* A btrfs filesystem mounted under `/var/bocker`
-* A network bridge called `bridge0` and an IP of 10.0.0.1/24
-* IP forwarding enabled in `/proc/sys/net/ipv4/ip_forward`
-* A firewall routing traffic from `bridge0` to a physical interface.
+* 아래에 마운트된 btrfs 파일 시스템 `/var/bocker`
+* 'bridge0'이라는 네트워크 브리지 및 10.0.0.1/24의 IP.
+* IP 포워딩이 `/proc/sys/net/ipv4/ip_forward`에서 활성화된 경우
+* 'bridge0'에서 물리적 인터페이스로 트래픽을 라우팅하는 방화벽.
 
-For ease of use a Vagrantfile is included which will build the needed environment.
+사용 편의성을 위해 필요한 환경을 구축할 수 있는 Vagrant파일이 포함되어 있습니다.
 
-Even if you meet the above prerequisites you probably still want to **run bocker in a virtual machine**. Bocker runs as root and among other things needs to make changes to your network interfaces, routing table, and firewall rules. **I can make no guarantees that it won't trash your system**.
+위의 전제 조건을 충족하더라도 가상 머신에서 **보커를 실행**하고 싶을 수도 있습니다. Bocker는 루트로 실행되며 무엇보다도 네트워크 인터페이스, 라우팅 테이블 및 방화벽 규칙을 변경해야 합니다. **시스템을 엉망으로 만들지 않는다는 보장은 없습니다**.
 
 ## Example Usage
 
@@ -104,7 +106,7 @@ $ cat /sys/fs/cgroup/memory/ps_42188/memory.limit_in_bytes
 1024000000
 ```
 
-## Functionality: Currently Implemented
+## 기능: 현재 구현됨
 
 * `docker build` †
 * `docker pull`
@@ -118,13 +120,13 @@ $ cat /sys/fs/cgroup/memory/ps_42188/memory.limit_in_bytes
 * Networking
 * Quota Support / CGroups
 
-† `bocker init` provides a very limited implementation of `docker build`
+'bocker init'은 매우 제한적인 `docker build` 구현을 제공합니다.
 
-## Functionality: Not Yet Implemented
+## 기능을 매우 제한적으로 구현합니다: 아직 구현되지 않음
 
-* Data Volume Containers
-* Data Volumes
-* Port Forwarding
+* 데이터 볼륨 컨테이너
+* 데이터 볼륨
+* 포트 포워딩
 
 ## 코드 로직 단순나열
 다음은 `bocker` 스크립트의 각 줄에 대한 설명입니다:
