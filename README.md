@@ -13,9 +13,7 @@
       - [그 외 구현](#그-외-구현)
   - [각 함수 설명](#각-함수-설명)
       - [초기 설정과 기본 구조](#초기-설정과-기본-구조)
-      - [이미지 관리 기능](#이미지-관리-기능)
-      - [컨테이너 실행 및 관리](#컨테이너-실행-및-관리)
-      - [도움말 및 유틸리티 기능](#도움말-및-유틸리티-기능)
+    - [기타 유틸리티 함수들](#기타-유틸리티-함수들)
       - [전체 워크플로우 요약](#전체-워크플로우-요약)
   - [License](#license)
 
@@ -311,19 +309,274 @@ btrfs_path='/var/bocker' && cgroups='cpu,cpuacct,memory';
 - **설정 이유**: 안정적인 스크립트 실행과 오류 처리를 위한 설정입니다.
 - **Btrfs와 cgroups**: 컨테이너 격리와 리소스 관리에 필요한 기술입니다.
 
-#### 이미지 관리 기능
+> #### 1. `bocker_check()` - 컨테이너/이미지 존재 확인 함수
 
-> 1. 이미지 확인 (bocker_check)
 ```bash
 function bocker_check() {
     btrfs subvolume list "$btrfs_path" | grep -qw "$1" && echo 0 || echo 1
 }
 ```
-- **시나리오**: 모든 작업 전에 이미지/컨테이너가 존재하는지 확인합니다.
-- **작업**: Btrfs 서브볼륨 목록에서 ID를 검색합니다.
-- **이유**: 오류를 방지하고 사용자에게 명확한 피드백을 제공하기 위함입니다.
+```
+이 함수는 Bocker의 가장 기본적인 유틸리티 함수로, 특정 ID를 가진 이미지나 컨테이너가 시스템에 존재하는지 확인합니다. Btrfs 파일시스템의 서브볼륨 목록을 가져와 우리가 찾는 ID가 있는지 grep으로 검색합니다. 찾으면 0을, 찾지 못하면 1을 출력합니다.
 
-> 2. 이미지 목록 표시 (bocker_images)
+이 함수는 모든 Bocker 명령어의 시작점으로, 작업을 진행하기 전에 항상 대상이 유효한지 검증합니다. 예를 들어 존재하지 않는 이미지로 컨테이너를 실행하려 하거나, 없는 컨테이너를 삭제하려는 시도를 방지합니다. 사용자에게 명확한 오류 메시지를 제공하기 위한 첫 번째 방어선입니다.
+```
+
+**내부 동작 과정:**
+1. `btrfs subvolume list "$btrfs_path"`는 btrfs 파일시스템에서 모든 서브볼륨 목록을 가져옵니다
+2. 파이프(`|`)를 통해 목록을 `grep -qw "$1"`으로 전달하여 매개변수와 정확히 일치하는 이름의 서브볼륨을 조용히 검색합니다
+3. `&&` 및 `||` 연산자로 검색 결과에 따라 다른 값을 출력합니다:
+   - 일치하는 항목이 발견되면 `echo 0` (성공을 의미)
+   - 발견되지 않으면 `echo 1` (실패를 의미)
+
+이 함수는 다른 모든 함수들의 기반이 되는 유틸리티 함수로, 작업 실행 전에 대상이 실제로 존재하는지 확인합니다.
+
+> #### 2. `bocker_init()` - 디렉토리로부터 이미지 생성 함수
+
+```bash
+function bocker_init() {
+    uuid="img_$(shuf -i 42002-42254 -n 1)"
+    
+    if [[ -d "$1" ]]; then
+        [[ "$(bocker_check "$uuid")" == 0 ]] && bocker_run "$@"
+        btrfs subvolume create "$btrfs_path/$uuid" > /dev/null
+        cp -rf --reflink=auto "$1"/* "$btrfs_path/$uuid" > /dev/null
+        [[ ! -f "$btrfs_path/$uuid"/img.source ]] && echo "$1" > "$btrfs_path/$uuid"/img.source
+        echo "Created: $uuid"
+    else
+        echo "No directory named '$1' exists"
+    fi
+}
+```
+```
+이 함수는 로컬 디렉토리를 Docker 이미지로 변환합니다. 작업 흐름은 다음과 같습니다:
+
+1. 먼저 "img_"로 시작하는 랜덤 ID를 생성합니다
+2. 지정된 디렉토리가 실제로 존재하는지 확인합니다
+3. 새로운 Btrfs 서브볼륨을 생성하고, Copy-on-Write 방식으로 디렉토리 내용을 복사합니다
+4. 이미지 출처 정보를 기록합니다
+
+이 함수는 로컬 개발 환경에서 직접 이미지를 만들거나, Docker Hub에서 다운로드한 이미지 레이어를 처리할 때 사용됩니다. Copy-on-Write 기능을 활용하여 디스크 공간을 효율적으로 사용하면서도, 각 이미지가 완전한 파일 시스템을 가질 수 있게 합니다.
+```
+
+**내부 동작 과정:**
+1. 임의의 5자리 숫자(42002~42254)를 생성하고 "img_" 접두사와 함께 UUID로 설정합니다
+2. `if [[ -d "$1" ]]`로 지정된 디렉토리가 존재하는지 확인합니다
+3. `bocker_check "$uuid"`로 생성된 UUID가 이미 사용 중인지 검사합니다
+   - 중복이면 `bocker_run "$@"`을 호출해 현재 인자들로 함수를 다시 실행합니다 (재귀)
+4. `btrfs subvolume create`로 새 Btrfs 서브볼륨을 생성합니다
+5. `cp -rf --reflink=auto`로 원본 디렉토리의 파일을 새 서브볼륨에 복사합니다
+   - `--reflink=auto` 옵션은 가능한 경우 Copy-on-Write 기능을 활용해 디스크 공간을 절약합니다
+6. 이미지 출처를 추적할 메타데이터 파일을 생성합니다
+7. 성공 메시지와 함께 생성된 이미지 ID를 출력합니다
+
+> #### 3. bocker_pull() - Docker Hub에서 이미지 가져오기 함수
+
+```bash
+function bocker_pull() {
+    token="$(curl -sL -o /dev/null -D- -H 'X-Docker-Token: true' "https://index.docker.io/v1/repositories/$1/images" | tr -d '\r' | awk -F ': *' '$1 == "X-Docker-Token" { print $2 }')"
+    registry='https://registry-1.docker.io/v1'
+    id="$(curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags/$2" | sed 's/"//g')"
+    [[ "${#id}" -ne 64 ]] && echo "No image named '$1:$2' exists" && exit 1
+    ancestry="$(curl -sL -H "Authorization: Token $token" "$registry/images/$id/ancestry)"
+    IFS=',' && ancestry=(${ancestry//[\[\] \"]/}) && IFS=' \n\t'; tmp_uuid="$(uuidgen)" && mkdir /tmp/"$tmp_uuid"
+    for id in "${ancestry[@]}"; do
+        curl -#L -H "Authorization: Token $token" "$registry/images/$id/layer" -o /tmp/"$tmp_uuid"/layer.tar
+        tar xf /tmp/"$tmp_uuid"/layer.tar -C /tmp/"$tmp_uuid" && rm /tmp/"$tmp_uuid"/layer.tar
+    done
+    echo "$1:$2" > /tmp/"$tmp_uuid"/img.source
+    bocker_init /tmp/"$tmp_uuid" && rm -rf /tmp/"$tmp_uuid"
+}
+```
+```
+이 함수는 Docker Hub에서 이미지를 가져오는 작업을 수행합니다. Docker Registry API와 통신하여 다음과 같은 과정으로 이미지를 다운로드합니다:
+
+1. Docker Hub API에 인증 요청을 보내 토큰을 받습니다
+2. 받은 토큰으로 요청한 이미지:태그의 ID를 조회합니다
+3. 이미지의 계층 구조를 파악하고 각 레이어를 순차적으로 다운로드합니다
+4. 모든 레이어를 임시 디렉토리에 압축 해제한 후, 이를 하나의 이미지로 변환합니다
+
+이 과정은 Docker가 내부적으로 이미지를 처리하는 방식을 간소화한 것입니다. 레이어드 파일 시스템 대신 단일 Btrfs 볼륨을 사용하기 때문에 계층 구조를 평면화하여 처리합니다. 이로 인해 Docker의 이미지 캐싱 이점은 잃지만, 간결한 구현이 가능해집니다.
+```
+
+**내부 동작 과정:**
+1. Docker Registry API와 통신하기 위한 인증 토큰을 획득합니다:
+   - `curl` 요청을 보내고 `-D-` 옵션으로 HTTP 헤더만 추출합니다
+   - `tr -d '\r'`로 캐리지 리턴을 제거합니다
+   - `awk`로 'X-Docker-Token' 헤더 값을 추출합니다
+2. 레지스트리 기본 URL을 설정합니다
+3. 두 번째 `curl` 요청으로 요청된 이미지:태그의 ID를 가져옵니다:
+   - JSON 응답에서 따옴표를 제거하기 위해 `sed 's/"//g'`를 사용합니다
+4. ID가 64자 SHA256 해시가 아니면 이미지가 존재하지 않는 것으로 간주하고 종료합니다
+5. 세 번째 `curl` 요청으로 이미지의 계층 구조(ancestry) 정보를 가져옵니다
+6. 복잡한 문자열 처리로 JSON 배열을 Bash 배열로 변환합니다:
+   - `IFS=','`는 필드 구분자를 쉼표로 설정합니다
+   - `${ancestry//[\[\] \"]/}`는 대괄호와 따옴표를 제거합니다
+   - 처리 후 `IFS=' \n\t'`로 구분자를 원래대로 복원합니다
+7. 임시 디렉토리를 생성합니다
+8. 각 레이어를 순회하며:
+   - `curl -#L`로 레이어 tarball을 다운로드합니다 (`-#`는 진행 상태 표시줄 제공)
+   - `tar xf`로 압축을 해제하고 원본 tar 파일을 삭제합니다
+9. 이미지 출처 정보를 기록합니다
+10. 임시 디렉토리를 `bocker_init`에 전달하여 이미지로 변환하고, 작업 완료 후 임시 디렉토리를 삭제합니다
+
+> #### 4. bocker_run() - 컨테이너 생성 및 실행 함수
+
+```bash
+function bocker_run() {
+    uuid="ps_$(shuf -i 42002-42254 -n 1)"
+    [[ "$(bocker_check "$1")" == 1 ]] && echo "No image named '$1' exists" && exit 1
+    [[ "$(bocker_check "$uuid")" == 0 ]] && echo "UUID conflict, retrying..." && bocker_run "$@" && return
+    cmd="${@:2}" && ip="$(echo "${uuid: -3}" | sed 's/0//g')" && mac="${uuid: -3:1}:${uuid: -2}"
+    
+    # 네트워크 설정
+    ip link add dev veth0_"$uuid" type veth peer name veth1_"$uuid"
+    ip link set dev veth0_"$uuid" up
+    ip link set veth0_"$uuid" master bridge0
+    ip netns add netns_"$uuid"
+    ip link set veth1_"$uuid" netns netns_"$uuid"
+    ip netns exec netns_"$uuid" ip link set dev lo up
+    ip netns exec netns_"$uuid" ip link set veth1_"$uuid" address 02:42:ac:11:00"$mac"
+    ip netns exec netns_"$uuid" ip addr add 10.0.0."$ip"/24 dev veth1_"$uuid"
+    ip netns exec netns_"$uuid" ip link set dev veth1_"$uuid" up
+    ip netns exec netns_"$uuid" ip route add default via 10.0.0.1
+    
+    # 파일시스템 설정
+    btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$uuid" > /dev/null
+    echo 'nameserver 8.8.8.8' > "$btrfs_path/$uuid"/etc/resolv.conf
+    echo "$cmd" > "$btrfs_path/$uuid/$uuid.cmd"
+    
+    # 리소스 제한 설정
+    cgcreate -g "$cgroups:/$uuid"
+    : "${BOCKER_CPU_SHARE:=512}" && cgset -r cpu.shares="$BOCKER_CPU_SHARE" "$uuid"
+    : "${BOCKER_MEM_LIMIT:=512}" && cgset -r memory.limit_in_bytes="$((BOCKER_MEM_LIMIT * 1000000))" "$uuid"
+    
+    # 컨테이너 실행
+    cgexec -g "$cgroups:$uuid" ip netns exec netns_"$uuid" unshare -fmuip --mount-proc chroot "$btrfs_path/$uuid" /bin/sh -c "/bin/mount -t proc proc /proc && $cmd" 2>&1 | tee "$btrfs_path/$uuid/$uuid.log" || true
+    
+    # 정리
+    ip link del dev veth0_"$uuid"
+    ip netns del netns_"$uuid"
+}
+```
+```
+사용자가 시스템에 있는 모든 이미지를 확인하고자 할 때, 시스템은 모든 이미지 서브볼륨을 순회하며 각 이미지의 ID와 출처를 표시한다. 이를 통해 사용자는 사용 가능한 이미지를 빠르게 파악할 수 있다.
+
+한편, 사용자가 특정 이미지로부터 새로운 컨테이너를 실행하려고 할 때, `bocker_run` 함수가 이를 처리한다. 이 함수는 우선 고유한 컨테이너 ID를 생성한 후, 이미지 서브볼륨의 스냅샷을 만들어 컨테이너 파일시스템을 준비한다. 이후 네트워크 인터페이스 및 네임스페이스를 설정하여 가상 이더넷, IP, MAC 주소를 할당하며, cgroup을 활용해 CPU와 메모리 사용량을 제한한다. 마지막으로, 네임스페이스 격리 및 chroot를 적용하여 컨테이너 환경을 구성하고 실행할 명령을 수행한다.
+
+이 모든 과정은 격리된 환경에서 애플리케이션을 실행하면서도 자원의 사용량을 효과적으로 제어하기 위해 설계되었다.
+
+```
+
+**내부 동작 과정:**
+1. 컨테이너 ID 생성 및 유효성 검사:
+   - "ps_" 접두사와 랜덤 숫자로 컨테이너 ID를 생성합니다
+   - `bocker_check`로 이미지 존재 여부와 ID 중복을 검사합니다
+   - 중복 ID가 발견되면 재귀적으로 다시 시도합니다
+2. 입력 매개변수와 네트워크 설정 준비:
+   - `${@:2}`는 두 번째 인수부터의 모든 인수를 명령어로 결합합니다
+   - 컨테이너 ID에서 IP와 MAC 주소 일부를 파생시킵니다:
+     - 마지막 3자리에서 0을 제거하여 IP 주소 끝자리를 만듭니다
+     - 마지막 3자리 중 첫 번째와 두 번째를 MAC 주소 일부로 사용합니다
+3. 네트워크 네임스페이스와 인터페이스 설정:
+   - 호스트와 컨테이너 간 통신을 위한 가상 이더넷(veth) 쌍을 생성합니다
+   - 호스트 측 인터페이스를 활성화하고 브릿지에 연결합니다
+   - 컨테이너 전용 네트워크 네임스페이스를 생성합니다
+   - veth 쌍의 컨테이너 측 인터페이스를 네임스페이스로 이동합니다
+   - 네임스페이스 내에서 루프백 인터페이스 활성화, MAC 주소 설정, IP 할당, 라우팅 설정을 진행합니다
+4. 컨테이너 파일시스템 설정:
+   - 이미지의 Btrfs 스냅샷을 만들어 컨테이너의 독립된 파일시스템을 생성합니다
+   - Google Public DNS를 사용하도록 resolv.conf를 설정합니다
+   - 실행할 명령어를 기록 파일에 저장합니다
+5. 리소스 제한 설정:
+   - cgroup을 생성하고 CPU 및 메모리 제한을 설정합니다
+   - `: "${BOCKER_CPU_SHARE:=512}"`는 환경변수가 설정되지 않은 경우 기본값을 사용합니다
+6. 컨테이너 실행 블록:
+   - `cgexec`으로 cgroup 리소스 제한 내에서 실행합니다
+   - `ip netns exec`로 컨테이너의 네트워크 네임스페이스에서 실행합니다
+   - `unshare`로 다양한 네임스페이스(파일시스템, 마운트, UTS, IPC, PID)를 격리합니다
+   - `chroot`로 컨테이너 루트 디렉토리를 변경합니다
+   - `/bin/sh -c`로 명령을 쉘을 통해 실행합니다
+   - `/bin/mount -t proc proc /proc && $cmd`로 proc 파일시스템을 마운트한 후 사용자 명령을 실행합니다
+   - 모든 출력을 로그 파일에 저장하고 동시에 표시합니다
+   - `|| true`로 명령 실패가 스크립트 전체 실행을 중단시키지 않도록 합니다
+7. 리소스 정리:
+   - 컨테이너 종료 후 생성했던 네트워크 리소스를 정리합니다
+   - veth 인터페이스와 네트워크 네임스페이스를 제거합니다
+
+> #### 5. bocker_exec() - 실행 중인 컨테이너에서 명령 실행
+
+```bash
+function bocker_exec() {
+    [[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
+    cid="$(ps o ppid,pid | grep "^$(ps o pid,cmd | grep -E "^\ *[0-9]+ unshare.*$1" | awk '{print $1}')" | awk '{print $2}')"
+    [[ ! "$cid" =~ ^\ *[0-9]+$ ]] && echo "Container '$1' exists but is not running" && exit 1
+    nsenter -t "$cid" -m -u -i -n -p chroot "$btrfs_path/$1" "${@:2}"
+}
+```
+```
+이 함수는 이미 실행 중인 컨테이너에 추가 명령을 실행하는 기능을 제공합니다. 작동 흐름은 다음과 같습니다:
+
+1. 먼저 지정된 컨테이너가 존재하는지 검증합니다
+2. ps 명령어와 여러 필터링 도구를 조합하여 컨테이너의 프로세스 ID를 찾아냅니다
+3. nsenter 명령으로 해당 프로세스의 네임스페이스에 진입합니다
+4. 컨테이너 환경에서 요청된 명령을 실행합니다
+
+이 함수는 실행 중인 컨테이너 내부에서 문제를 해결하거나, 파일을 조회하거나, 설정을 변경하는 등의 작업을 가능하게 합니다. ps와 grep 같은 표준 Unix 도구를 창의적으로 조합하여 복잡한 프로세스 탐색 로직을 구현한 것이 특징입니다.
+```
+
+**내부 동작 과정:**
+1. 컨테이너 존재 여부 확인:
+   - `bocker_check`로 컨테이너 서브볼륨이 존재하는지 검사합니다
+2. 복잡한 프로세스 검색 파이프라인으로 컨테이너의 PID를 찾습니다:
+   - 첫 번째 `ps o pid,cmd`로 모든 프로세스의 PID와 명령어를 나열합니다
+   - `grep -E "^\ *[0-9]+ unshare.*$1"`로 컨테이너 ID를 포함한 unshare 명령을 찾습니다
+   - `awk '{print $1}'`로 첫 번째 필드(PID)만 추출합니다
+   - 이 PID를 부모 PID로 가진 프로세스를 찾기 위해 다시 `ps o ppid,pid`를 실행합니다
+   - 최종적으로 `awk '{print $2}'`로 자식 프로세스의 PID를 얻습니다
+3. PID 유효성 검사:
+   - 정규식 `^\ *[0-9]+$`로 숫자로만 이루어졌는지 확인합니다
+   - 유효하지 않으면 컨테이너가 존재하지만 실행 중이 아니라고 판단합니다
+4. 컨테이너 네임스페이스에 진입하여 명령 실행:
+   - `nsenter`로 지정된 PID의 네임스페이스에 들어갑니다
+   - `-t "$cid"`는 타겟 PID를 지정합니다
+   - `-m -u -i -n -p`는 마운트, UTS, IPC, 네트워크, PID 네임스페이스에 진입을 의미합니다
+   - `chroot "$btrfs_path/$1"`로 컨테이너의 파일시스템 루트를 사용합니다
+   - `"${@:2}"`로 두 번째 인수부터의 모든 인수를 실행할 명령어로 사용합니다
+
+> #### 6. bocker_commit() - 컨테이너를 이미지로 변환
+
+```bash
+function bocker_commit() {
+    [[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
+    [[ "$(bocker_check "$2")" == 1 ]] && echo "No image named '$2' exists" && exit 1
+    bocker_rm "$2" && btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$2" > /dev/null
+    echo "Created: $2"
+}
+```
+```
+이 함수는 컨테이너의 현재 상태를 새 이미지로 저장합니다:
+
+1. 소스 컨테이너와 대상 이미지 ID가 유효한지 검증합니다
+2. 대상 이미지가 이미 존재한다면 삭제합니다
+3. 컨테이너 서브볼륨의 Btrfs 스냅샷을 생성하여 새 이미지를 만듭니다
+
+이 기능은 컨테이너에서 수행한 변경사항(소프트웨어 설치, 설정 변경 등)을 영구적으로 보존하여 새로운 이미지로 만들 수 있게 해줍니다. 개발 과정에서 환경을 점진적으로 구축하거나, 특정 구성을 재사용 가능한 이미지로 저장할 때 매우 유용합니다. Docker의 `docker commit`과 정확히 동일한 목적을 가진 기능입니다.
+```
+
+**내부 동작 과정:**
+1. 컨테이너와 이미지 존재 여부 확인:
+   - 첫 번째 매개변수(컨테이너 ID)가 존재하는지 검사합니다
+   - 두 번째 매개변수(이미지 ID)는 *존재하지 않아야* 하는 것이 논리적이지만, 코드는 오히려 존재해야 한다고 검사합니다 (가능한 버그)
+2. 기존 이미지 제거 및 새 이미지 생성:
+   - `bocker_rm "$2"`로 기존 이미지를 제거합니다 (덮어쓰기 효과)
+   - `btrfs subvolume snapshot`으로 컨테이너 서브볼륨의 스냅샷을 새 이미지 ID로 생성합니다
+3. 성공 메시지 출력:
+   - 생성된 이미지 ID를 포함하여 완료 메시지를 표시합니다
+
+### 기타 유틸리티 함수들
+
+> #### bocker_images() - 이미지 목록 표시
 ```bash
 function bocker_images() {
     echo -e "IMAGE_ID\t\tSOURCE"
@@ -333,29 +586,15 @@ function bocker_images() {
     done
 }
 ```
-- **시나리오**: 사용자가 시스템에 있는 모든 이미지를 확인하려고 할 때
-- **작업**: 모든 이미지 서브볼륨을 순회하며 ID와 출처를 표시합니다.
-- **이유**: 사용자가 사용 가능한 이미지를 빠르게 파악할 수 있게 합니다.
 
-#### 컨테이너 실행 및 관리
+**내부 동작 과정:**
+1. 테이블 헤더 출력
+2. glob 패턴 `img_*`으로 모든 이미지 서브볼륨 경로를 찾습니다
+3. 각 경로에 대해:
+   - `basename`으로 경로에서 이미지 ID만 추출합니다
+   - 이미지 ID와 해당 이미지의 출처 정보를 탭으로 구분하여 출력합니다
 
-> 3. 컨테이너 실행 (bocker_run)
-```bash
-function bocker_run() {
-    uuid="ps_$(shuf -i 42002-42254 -n 1)"
-    # ... 복잡한 설정 및 실행 코드
-}
-```
-- **시나리오**: 사용자가 이미지로부터 새 컨테이너를 실행하려고 할 때
-- **작업**:
-  1. 고유한 컨테이너 ID를 생성합니다.
-  2. 이미지 서브볼륨의 스냅샷을 만들어 컨테이너 파일시스템을 준비합니다.
-  3. 네트워크 인터페이스와 네임스페이스를 설정합니다(가상 이더넷, IP, MAC 주소).
-  4. cgroup으로 CPU와 메모리 사용량을 제한합니다.
-  5. 네임스페이스 격리와 chroot로 컨테이너 환경을 만들고 명령을 실행합니다.
-- **이유**: 격리된 환경에서 애플리케이션을 실행하면서 자원 사용량을 제어하기 위함입니다.
-
-> 4. 컨테이너 목록 조회 (bocker_ps)
+> #### bocker_ps() - 컨테이너 목록 표시
 ```bash
 function bocker_ps() {
     echo -e "CONTAINER_ID\t\tCOMMAND"
@@ -365,56 +604,91 @@ function bocker_ps() {
     done
 }
 ```
-- **시나리오**: 사용자가 현재 시스템의 모든 컨테이너를 확인하려고 할 때
-- **작업**: 모든 컨테이너 서브볼륨을 순회하며 ID와 실행 명령을 표시합니다.
-- **이유**: 실행 중이거나 종료된 컨테이너를 쉽게 식별할 수 있게 합니다.
-
-> 5. 컨테이너에서 명령 실행 (bocker_exec)
-```bash
-function bocker_exec() {
-    # 컨테이너 PID 찾고 명령 실행
-}
 ```
-- **시나리오**: 사용자가 실행 중인 컨테이너에 추가 명령을 실행하려고 할 때
-- **작업**:
-  1. 컨테이너의 PID를 찾습니다.
-  2. nsenter로 컨테이너의 네임스페이스에 진입합니다.
-  3. chroot로 컨테이너의 파일시스템에서 명령을 실행합니다.
-- **이유**: 실행 중인 컨테이너와 상호작용하여 디버깅이나 구성 변경을 위함입니다.
+이 함수는 시스템의 모든 컨테이너 목록을 보여줍니다. bocker_images와 유사한 방식으로 작동하지만, 컨테이너를 대상으로 합니다:
 
-> 6. 컨테이너 로그 조회 (bocker_logs)
+1. 테이블 헤더(CONTAINER_ID와 COMMAND)를 출력합니다
+2. "ps_" 접두사를 가진 모든 서브볼륨을 찾아 순회합니다
+3. 각 컨테이너의 ID와 실행 명령어를 표시합니다
+
+Docker의 `docker ps` 명령과 달리, 이 함수는 실행 중인 컨테이너만 필터링하지 않고 모든 컨테이너를 보여줍니다. 각 컨테이너는 생성 시 실행 명령어가 파일로 저장되기 때문에, 이미 종료된 컨테이너의 명령어도 확인할 수 있습니다. 이는 실행 기록을 추적하고 컨테이너를 관리하는 데 유용합니다.
+```
+
+**내부 동작 과정:**
+1. 테이블 헤더 출력
+2. glob 패턴 `ps_*`로 모든 컨테이너 서브볼륨 경로를 찾습니다
+3. 각 경로에 대해:
+   - `basename`으로 경로에서 컨테이너 ID만 추출합니다
+   - 컨테이너 ID와 해당 컨테이너에 저장된 명령어 정보를 출력합니다
+
+> #### bocker_logs() - 컨테이너 로그 보기
 ```bash
 function bocker_logs() {
+    [[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
     cat "$btrfs_path/$1/$1.log"
 }
 ```
-- **시나리오**: 사용자가 컨테이너의 출력 로그를 확인하려고 할 때
-- **작업**: 컨테이너가 생성한 로그 파일을 출력합니다.
-- **이유**: 문제 해결이나 컨테이너 동작 확인을 위함입니다.
+```
+이 함수는 컨테이너의 출력 로그를 확인하는 간단한 기능을 제공합니다:
 
-> 7. 컨테이너를 이미지로 변환 (bocker_commit)
+1. 지정된 컨테이너가 존재하는지 확인합니다
+2. 컨테이너의 로그 파일 내용을 출력합니다
+
+bocker_run 함수가 모든 컨테이너 출력을 로그 파일에 저장하기 때문에, 이 함수는 단순히 해당 파일을 표시하는 역할을 합니다. 컨테이너 실행 중 발생한 오류를 디버깅하거나 애플리케이션의 출력을 확인할 때 유용합니다. Docker의 `docker logs` 명령과 유사하지만, 실시간 로그 스트리밍은 지원하지 않는 간소화된 버전입니다.
+```
+
+**내부 동작 과정:**
+1. 컨테이너 존재 여부 확인
+2. 컨테이너 실행 시 저장된 로그 파일을 `cat` 명령으로 출력합니다
+
+> #### bocker_rm() - 이미지/컨테이너 삭제
 ```bash
-function bocker_commit() {
-    bocker_rm "$2" && btrfs subvolume snapshot "$btrfs_path/$1" "$btrfs_path/$2" > /dev/null
+function bocker_rm() {
+    [[ "$(bocker_check "$1")" == 1 ]] && echo "No container named '$1' exists" && exit 1
+    btrfs subvolume delete "$btrfs_path/$1" > /dev/null
+    cgdelete -g "$cgroups:/$1" &> /dev/null || true
+    echo "Removed: $1"
 }
 ```
-- **시나리오**: 사용자가 컨테이너 상태를 새 이미지로 저장하려고 할 때
-- **작업**: 
-  1. 기존 이미지가 있다면 삭제합니다.
-  2. 컨테이너 서브볼륨의 스냅샷을 이미지로 생성합니다.
-- **이유**: 변경된 컨테이너 상태를 재사용 가능한 이미지로 만들기 위함입니다.
+```
+이 함수는 이미지나 컨테이너를 삭제합니다. 단순하지만 효과적인 구현으로:
 
-#### 도움말 및 유틸리티 기능
+1. 먼저 bocker_check로 삭제할 대상이 실제로 존재하는지 확인합니다
+2. Btrfs 서브볼륨 삭제 명령으로 해당 이미지/컨테이너의 파일 시스템을 제거합니다
+3. 컨테이너였다면 관련 cgroup 리소스도 함께 정리합니다
 
-> 8. 도움말 표시 (bocker_help)
+특별한 점은 이미지와 컨테이너 삭제에 동일한 함수를 사용한다는 것입니다. cgroup 삭제가 실패해도 전체 명령이 실패하지 않도록 `|| true`로 처리했기 때문에 가능합니다. 이런 접근법은 코드를 간결하게 유지하면서도 다양한 상황을 처리할 수 있게 해줍니다.
+```
+
+**내부 동작 과정:**
+1. 대상 존재 여부 확인
+2. Btrfs 명령으로 해당 서브볼륨을 삭제합니다
+3. `cgdelete`로 관련된 cgroup도 삭제합니다
+   - `&> /dev/null || true`로 오류가 발생해도 무시합니다 (cgroup이 없을 수 있음)
+4. 삭제 완료 메시지를 출력합니다
+
+> #### bocker_help() - 도움말 표시
 ```bash
 function bocker_help() {
     sed -n "s/^.*#HELP\\s//p;" < "$1" | sed "s/\\\\n/\n\t/g;s/$/\n/;s!BOCKER!${1/!/\\!}!g"
 }
 ```
-- **시나리오**: 사용자가 도움말을 보려고 할 때
-- **작업**: 소스 코드에서 #HELP 주석을 추출하여 사용법을 보여줍니다.
-- **이유**: 사용자에게 사용 방법을 안내하기 위함입니다.
+```
+이 함수는 Bocker의 사용법을 보여주는 도움말 시스템을 구현합니다:
+
+1. 소스 코드에서 #HELP로 표시된 주석을 추출합니다
+2. 추출된 텍스트를 보기 좋게 형식화합니다
+3. 도움말 내용을 사용자에게 표시합니다
+
+이 접근 방식의 가장 큰 장점은 코드와 문서를 함께 관리할 수 있다는 것입니다. 개발자가 함수를 수정할 때 바로 옆에 있는 도움말도 함께 업데이트할 가능성이 높아져, 문서가 항상 최신 상태로 유지됩니다. 또한 별도의 도움말 파일을 관리하지 않아도 되므로 유지보수가 간편해집니다. 코드가 자체 문서화되는 우아한 예시입니다.
+```
+
+**내부 동작 과정:**
+1. `sed -n "s/^.*#HELP\\s//p;"`로 입력 파일에서 #HELP로 표시된 주석 줄을 찾아 패턴 앞부분을 제거합니다
+2. 결과를 다시 `sed` 파이프라인으로 전달하여:
+   - `"s/\\\\n/\n\t/g"`로 이스케이프된 줄바꿈 문자를 실제 줄바꿈과 탭으로 변환합니다
+   - `s/$/\n/`로 각 줄 끝에 줄바꿈을 추가합니다
+   - `s!BOCKER!${1/!/\\!}!g`로 "BOCKER" 텍스트를 실제 스크립트 이름으로 대체합니다 (특수문자 처리 포함)
 
 #### 전체 워크플로우 요약
 
