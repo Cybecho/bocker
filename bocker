@@ -14,13 +14,13 @@ function bocker_init() { #HELP Create an image from a directory:\nBOCKER init <d
 		btrfs subvolume create "$btrfs_path/$uuid" > /dev/null                    				# 새 서브볼륨 생성
 		cp -rf --reflink=auto "$1"/* "$btrfs_path/$uuid" > /dev/null             				# 디렉토리 내용 복사
 		[[ ! -f "$btrfs_path/$uuid"/img.source ]] && echo "$1" > "$btrfs_path/$uuid"/img.source # 소스 기록
-		echo "Created: $uuid"                                                      				# 성공 메시지 출력
+		echo "Created: $uuid"  c                                                    			# 성공 메시지 출력
 	else
 		echo "No directory named '$1' exists"                                     				# 오류 메시지 출력
 	fi
 }
 
-function bocker_pull() { #HELP Pull an image from Docker Hub:\nBOCKER pull <name> <tag>    # Docker Hub에서 이미지 가져오기 함수
+function bocker_pull() { #HELP Pull an image from Docker Hub:\nBOCKER pull <name> <tag>    		# Docker Hub에서 이미지 가져오기 함수
 	token="$(curl -sL -o /dev/null -D- -H 'X-Docker-Token: true' "https://index.docker.io/v1/repositories/$1/images" | tr -d '\r' | awk -F ': *' '$1 == "X-Docker-Token" { print $2 }')"    # Docker 인증 토큰 획득
 	registry='https://registry-1.docker.io/v1'                                    				# 레지스트리 URL 설정
 	id="$(curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags/$2" | sed 's/"//g')"    			# 이미지 ID 가져오기

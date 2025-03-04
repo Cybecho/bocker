@@ -1,4 +1,4 @@
-$script = <<SCRIPT
+chat$script = <<SCRIPT
 (
 rpm -i https://dl.fedoraproject.org/pub/epel/7/x86_64/e/epel-release-7-5.noarch.rpm
 yum install -y -q autoconf automake btrfs-progs docker gettext-devel git libcgroup-tools libtool python-pip
